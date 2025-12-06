@@ -7,7 +7,7 @@
 
 #include "capture_device.h"
 #include "resolution.h"
-#include "deray_executor.hpp"
+#include "scope_guard.hpp"
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "strmiids.lib")
@@ -15,7 +15,7 @@
 
 std::string get_device_name(IMoniker *pMoniker)
 {
-    DerayExecutor auto_releaser;
+    ScopeGuard auto_releaser;
 
     IPropertyBag *pPropBag = nullptr;
     if (FAILED(pMoniker->BindToStorage(0, 0, IID_IPropertyBag, (void **)&pPropBag)))
@@ -43,7 +43,7 @@ std::string get_device_name(IMoniker *pMoniker)
 
 std::vector<Resolution> get_device_resolutions(IMoniker *pMoniker)
 {
-    DerayExecutor auto_releaser;
+    ScopeGuard auto_releaser;
 
     IBaseFilter *pFilter = nullptr;
     if (FAILED(pMoniker->BindToObject(0, 0, IID_IBaseFilter, (void **)&pFilter)))
@@ -64,7 +64,7 @@ std::vector<Resolution> get_device_resolutions(IMoniker *pMoniker)
     IPin *pPin = nullptr;
     while (pEnumPins->Next(1, &pPin, nullptr) == S_OK)
     {
-        DerayExecutor loop_releaser;
+        ScopeGuard loop_releaser;
 
         loop_releaser.add_release(pPin);
 
@@ -123,7 +123,7 @@ std::vector<Resolution> get_device_resolutions(IMoniker *pMoniker)
 
 std::vector<CaptureDevice> list_devices()
 {
-    DerayExecutor auto_releaser;
+    ScopeGuard auto_releaser;
 
     if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)))
     {
