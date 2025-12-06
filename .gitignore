@@ -1,0 +1,4 @@
+build/
+__pycache__/
+windows_capture_device_list.egg-info/
+*.pyd
