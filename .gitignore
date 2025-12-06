@@ -1,4 +1,13 @@
-build/
+# cached files
 __pycache__/
+.pytest_cache/
+.venv/
+
+# build
+build/
 windows_capture_device_list.egg-info/
 *.pyd
+
+# uv
+uv.lock
+.python-version
