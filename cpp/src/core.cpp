@@ -7,7 +7,7 @@
 
 #include "capture_device.h"
 #include "resolution.h"
-#include "deray_executor.hpp"
+#include "scope_guard.hpp"
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "strmiids.lib")
@@ -15,14 +15,14 @@
 
 std::string get_device_name(IMoniker *pMoniker)
 {
-    DerayExecutor auto_releaser;
+    ScopeGuard scope_guard;
 
     IPropertyBag *pPropBag = nullptr;
     if (FAILED(pMoniker->BindToStorage(0, 0, IID_IPropertyBag, (void **)&pPropBag)))
     {
         return "Unknown";
     }
-    auto_releaser.add_release(pPropBag);
+    scope_guard.add_release(pPropBag);
 
     VARIANT var;
     VariantInit(&var);
@@ -43,37 +43,37 @@ std::string get_device_name(IMoniker *pMoniker)
 
 std::vector<Resolution> get_device_resolutions(IMoniker *pMoniker)
 {
-    DerayExecutor auto_releaser;
+    ScopeGuard scope_guard;
 
     IBaseFilter *pFilter = nullptr;
     if (FAILED(pMoniker->BindToObject(0, 0, IID_IBaseFilter, (void **)&pFilter)))
     {
         return {};
     }
-    auto_releaser.add_release(pFilter);
+    scope_guard.add_release(pFilter);
 
     IEnumPins *pEnumPins = nullptr;
     if (FAILED(pFilter->EnumPins(&pEnumPins)))
     {
         return {};
     }
-    auto_releaser.add_release(pEnumPins);
+    scope_guard.add_release(pEnumPins);
 
     std::vector<Resolution> resolutions;
 
     IPin *pPin = nullptr;
     while (pEnumPins->Next(1, &pPin, nullptr) == S_OK)
     {
-        DerayExecutor loop_releaser;
+        ScopeGuard loop_guard;
 
-        loop_releaser.add_release(pPin);
+        loop_guard.add_release(pPin);
 
         IAMStreamConfig *pConfig = nullptr;
         if (FAILED(pPin->QueryInterface(IID_IAMStreamConfig, (void **)&pConfig)))
         {
             continue;
         }
-        loop_releaser.add_release(pConfig);
+        loop_guard.add_release(pConfig);
 
         int count = 0, size = 0;
         if (FAILED(pConfig->GetNumberOfCapabilities(&count, &size)))
@@ -123,27 +123,27 @@ std::vector<Resolution> get_device_resolutions(IMoniker *pMoniker)
 
 std::vector<CaptureDevice> list_devices()
 {
-    DerayExecutor auto_releaser;
+    ScopeGuard scope_guard;
 
     if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)))
     {
         return {};
     }
-    auto_releaser.add(&CoUninitialize);
+    scope_guard.add(&CoUninitialize);
 
     ICreateDevEnum *pDevEnum = nullptr;
     if (FAILED(CoCreateInstance(CLSID_SystemDeviceEnum, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pDevEnum))))
     {
         return {};
     }
-    auto_releaser.add_release(pDevEnum);
+    scope_guard.add_release(pDevEnum);
 
     IEnumMoniker *pEnum = nullptr;
     if (!(pDevEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &pEnum, 0) == S_OK && pEnum))
     {
         return {};
     }
-    auto_releaser.add_release(pEnum);
+    scope_guard.add_release(pEnum);
 
     std::vector<CaptureDevice> devices;
 

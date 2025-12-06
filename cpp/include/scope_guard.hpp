@@ -3,10 +3,10 @@
 #include <functional>
 #include <stack>
 
-class DerayExecutor
+class ScopeGuard
 {
 public:
-    ~DerayExecutor() noexcept
+    ~ScopeGuard() noexcept
     {
         while (!functions_.empty())
         {
