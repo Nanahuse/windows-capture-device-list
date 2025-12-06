@@ -5,6 +5,8 @@
     "python.testing.unittestEnabled": false,
     "python.testing.pytestEnabled": true,
     "C_Cpp.default.includePath": [
-        "${workspaceFolder}/src",
+        "${workspaceFolder}/.venv/Lib/site-packages/pybind11/include",
+        "${workspaceFolder}/cpp/include",
+        "${workspaceFolder}/cpp/src",
     ]
 }

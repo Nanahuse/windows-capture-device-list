@@ -4,8 +4,8 @@ import pybind11
 ext_modules = [
     Extension(
         "windows_capture_device_list.core",
-        ["src/core.cpp"],
-        include_dirs=[pybind11.get_include()],
+        ["cpp/src/core.cpp"],
+        include_dirs=[pybind11.get_include(), "cpp/include"],
         language="c++",
     )
 ]
