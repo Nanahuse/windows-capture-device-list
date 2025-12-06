@@ -1,186 +1,160 @@
 #include <string>
 #include <vector>
+#include <algorithm>
 
 #include <windows.h>
 #include <dshow.h>
 
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
+#include "capture_device.h"
+#include "resolution.h"
+#include "deray_executor.hpp"
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "strmiids.lib")
 #pragma comment(lib, "oleaut32.lib")
 
-namespace py = pybind11;
-
-struct Resolution
-{
-    int width;
-    int height;
-};
-
-struct CaptureDevice
-{
-    int id;
-    std::string name;
-    std::vector<Resolution> resolutions;
-};
-
 std::string get_device_name(IMoniker *pMoniker)
 {
-    std::string name = "Unknown";
+    DerayExecutor auto_releaser;
+
     IPropertyBag *pPropBag = nullptr;
-    HRESULT hr = pMoniker->BindToStorage(0, 0, IID_IPropertyBag, (void **)&pPropBag);
-    if (FAILED(hr))
+    if (FAILED(pMoniker->BindToStorage(0, 0, IID_IPropertyBag, (void **)&pPropBag)))
     {
-        return name;
+        return "Unknown";
     }
+    auto_releaser.add_release(pPropBag);
 
     VARIANT var;
     VariantInit(&var);
-    hr = pPropBag->Read(L"FriendlyName", &var, 0);
-    if (FAILED(hr))
+    if (FAILED(pPropBag->Read(L"FriendlyName", &var, 0)))
     {
         VariantClear(&var);
-        pPropBag->Release();
-        return name;
+        return "Unknown";
     }
 
     wchar_t *wname = var.bstrVal;
     char cname[256];
     WideCharToMultiByte(CP_UTF8, 0, wname, -1, cname, sizeof(cname), nullptr, nullptr);
-    name = cname;
+    std::string name = cname;
 
     VariantClear(&var);
-    pPropBag->Release();
+    return name;
 }
 
 std::vector<Resolution> get_device_resolutions(IMoniker *pMoniker)
 {
-    std::vector<Resolution> resolutions;
+    DerayExecutor auto_releaser;
+
     IBaseFilter *pFilter = nullptr;
-    HRESULT hr = pMoniker->BindToObject(0, 0, IID_IBaseFilter, (void **)&pFilter);
-    if (SUCCEEDED(hr))
+    if (FAILED(pMoniker->BindToObject(0, 0, IID_IBaseFilter, (void **)&pFilter)))
     {
-        IEnumPins *pEnumPins = nullptr;
-        hr = pFilter->EnumPins(&pEnumPins);
-        if (SUCCEEDED(hr))
-        {
-            IPin *pPin = nullptr;
-            while (pEnumPins->Next(1, &pPin, nullptr) == S_OK)
-            {
-                IAMStreamConfig *pConfig = nullptr;
-                hr = pPin->QueryInterface(IID_IAMStreamConfig, (void **)&pConfig);
-                if (SUCCEEDED(hr))
-                {
-                    int count = 0, size = 0;
-                    hr = pConfig->GetNumberOfCapabilities(&count, &size);
-                    if (SUCCEEDED(hr))
-                    {
-                        for (int i = 0; i < count; ++i)
-                        {
-                            AM_MEDIA_TYPE *pmt = nullptr;
-                            std::vector<BYTE> caps(size);
-                            hr = pConfig->GetStreamCaps(i, &pmt, caps.data());
-                            if (SUCCEEDED(hr) && pmt->formattype == FORMAT_VideoInfo)
-                            {
-                                VIDEOINFOHEADER *vih = (VIDEOINFOHEADER *)pmt->pbFormat;
-                                int w = vih->bmiHeader.biWidth;
-                                int h = vih->bmiHeader.biHeight;
-                                Resolution res{w, h};
-                                // 重複排除
-                                bool exists = false;
-                                for (const auto &r : resolutions)
-                                {
-                                    if (r.width == res.width && r.height == res.height)
-                                    {
-                                        exists = true;
-                                        break;
-                                    }
-                                }
-                                if (!exists)
-                                {
-                                    resolutions.push_back(res);
-                                }
-                            }
-                            if (pmt)
-                            {
-                                if (pmt->cbFormat != 0)
-                                {
-                                    CoTaskMemFree((PVOID)pmt->pbFormat);
-                                    pmt->pbFormat = nullptr;
-                                }
-                                if (pmt->pUnk != nullptr)
-                                {
-                                    pmt->pUnk->Release();
-                                    pmt->pUnk = nullptr;
-                                }
-                                CoTaskMemFree(pmt);
-                            }
-                        }
-                    }
-                    pConfig->Release();
-                }
-                pPin->Release();
-            }
-            pEnumPins->Release();
-        }
-        pFilter->Release();
+        return {};
     }
+    auto_releaser.add_release(pFilter);
+
+    IEnumPins *pEnumPins = nullptr;
+    if (FAILED(pFilter->EnumPins(&pEnumPins)))
+    {
+        return {};
+    }
+    auto_releaser.add_release(pEnumPins);
+
+    std::vector<Resolution> resolutions;
+
+    IPin *pPin = nullptr;
+    while (pEnumPins->Next(1, &pPin, nullptr) == S_OK)
+    {
+        DerayExecutor loop_releaser;
+
+        loop_releaser.add_release(pPin);
+
+        IAMStreamConfig *pConfig = nullptr;
+        if (FAILED(pPin->QueryInterface(IID_IAMStreamConfig, (void **)&pConfig)))
+        {
+            continue;
+        }
+        loop_releaser.add_release(pConfig);
+
+        int count = 0, size = 0;
+        if (FAILED(pConfig->GetNumberOfCapabilities(&count, &size)))
+        {
+            continue;
+        }
+
+        for (int i = 0; i < count; ++i)
+        {
+            AM_MEDIA_TYPE *pmt = nullptr;
+            std::vector<BYTE> caps(size);
+
+            if (FAILED(pConfig->GetStreamCaps(i, &pmt, caps.data())))
+            {
+                continue;
+            }
+
+            if (pmt->formattype == FORMAT_VideoInfo)
+            {
+                VIDEOINFOHEADER *vih = (VIDEOINFOHEADER *)pmt->pbFormat;
+                int w = vih->bmiHeader.biWidth;
+                int h = vih->bmiHeader.biHeight;
+                Resolution res{w, h};
+                if (std::none_of(resolutions.begin(), resolutions.end(), [&](const Resolution &r)
+                                 { return r == res; }))
+                {
+                    resolutions.push_back(res);
+                }
+            }
+
+            if (pmt->cbFormat != 0)
+            {
+                CoTaskMemFree((PVOID)pmt->pbFormat);
+                pmt->pbFormat = nullptr;
+            }
+            if (pmt->pUnk != nullptr)
+            {
+                pmt->pUnk->Release();
+                pmt->pUnk = nullptr;
+            }
+            CoTaskMemFree(pmt);
+        }
+    }
+
     return resolutions;
 }
 
 std::vector<CaptureDevice> list_devices()
 {
-    std::vector<CaptureDevice> devices;
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    if (FAILED(hr))
+    DerayExecutor auto_releaser;
+
+    if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)))
     {
-        return devices;
+        return {};
     }
+    auto_releaser.add(&CoUninitialize);
 
     ICreateDevEnum *pDevEnum = nullptr;
-    hr = CoCreateInstance(CLSID_SystemDeviceEnum, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pDevEnum));
-    if (FAILED(hr))
+    if (FAILED(CoCreateInstance(CLSID_SystemDeviceEnum, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pDevEnum))))
     {
-        CoUninitialize();
-        return devices;
+        return {};
     }
+    auto_releaser.add_release(pDevEnum);
 
     IEnumMoniker *pEnum = nullptr;
-    hr = pDevEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &pEnum, 0);
-    if (hr == S_OK && pEnum)
+    if (!(pDevEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &pEnum, 0) == S_OK && pEnum))
     {
-        IMoniker *pMoniker = nullptr;
-        int id = 0;
-        while (pEnum->Next(1, &pMoniker, nullptr) == S_OK)
-        {
-            std::string name = get_device_name(pMoniker);
-            std::vector<Resolution> resolutions = get_device_resolutions(pMoniker);
-            devices.push_back(CaptureDevice{id++, name, resolutions});
-            pMoniker->Release();
-        }
-        pEnum->Release();
+        return {};
     }
-    pDevEnum->Release();
-    CoUninitialize();
+    auto_releaser.add_release(pEnum);
+
+    std::vector<CaptureDevice> devices;
+
+    IMoniker *pMoniker = nullptr;
+    int id = 0;
+    while (pEnum->Next(1, &pMoniker, nullptr) == S_OK)
+    {
+        std::string name = get_device_name(pMoniker);
+        std::vector<Resolution> resolutions = get_device_resolutions(pMoniker);
+        devices.push_back(CaptureDevice{id++, name, resolutions});
+        pMoniker->Release();
+    }
     return devices;
-}
-
-PYBIND11_MODULE(core, m)
-{
-    m.doc() = "Windows Capture Device List Module";
-
-    py::class_<Resolution>(m, "Resolution")
-        .def(py::init<int, int>())
-        .def_readonly("width", &Resolution::width)
-        .def_readonly("height", &Resolution::height);
-
-    py::class_<CaptureDevice>(m, "CaptureDevice")
-        .def(py::init<int, std::string, std::vector<Resolution>>())
-        .def_readonly("id", &CaptureDevice::id)
-        .def_readonly("name", &CaptureDevice::name)
-        .def_readonly("resolutions", &CaptureDevice::resolutions);
-
-    m.def("list_devices", &list_devices, "List video capture devices");
 }
