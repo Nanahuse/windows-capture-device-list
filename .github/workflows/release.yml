@@ -1,0 +1,72 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Verify tag matches pyproject.toml and setup.py
+        run: python .github/scripts/check_version.py "${{ github.ref_name }}"
+
+  build:
+    needs: validate
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: uv sync
+      - name: Build wheel
+        run: uv build --wheel --out-dir dist
+      - name: Clean-install and verify wheel
+        run: |
+          uv venv .verify-venv
+          $wheel = (Get-ChildItem dist/*.whl | Select-Object -First 1).FullName
+          uv pip install --python .verify-venv $wheel
+          uv pip install --python .verify-venv pytest
+          Push-Location .verify-venv
+          Scripts/python -c "import windows_capture_device_list as m; assert 'site-packages' in m.__file__, m.__file__"
+          Pop-Location
+          .verify-venv/Scripts/pytest test
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.python-version }}
+          path: dist/*.whl
+
+  release:
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: wheels
+          merge-multiple: true
+      - name: Create GitHub Release with wheels
+        uses: softprops/action-gh-release@v2
+        with:
+          files: wheels/*.whl

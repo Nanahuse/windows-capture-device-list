@@ -15,5 +15,13 @@ dev = [
     "pybind11>=3.0.1",
     "pybind11-stubgen>=2.5.5",
     "pytest>=9.0.1",
+    "ruff>=0.16.2",
     "setuptools>=80.9.0",
+    "ty>=0.0.71",
 ]
+
+[tool.ruff]
+extend-exclude = ["windows_capture_device_list/core.pyi"]
+
+[tool.ruff.format]
+exclude = ["windows_capture_device_list/core.pyi"]
