@@ -2,6 +2,7 @@
 #include <pybind11/stl.h>
 
 #include <iterator>
+#include <iomanip>
 #include <sstream>
 
 #include "capture_device.h"
@@ -32,9 +33,9 @@ PYBIND11_MODULE(core, m)
             py::object format = mode.format.empty() ? py::none() : py::cast(mode.format);
             result << "CaptureMode(width=" << mode.width
                    << ", height=" << mode.height
-                   << ", fps=" << mode.fps
+                   << ", fps=" << std::fixed << std::setprecision(2) << mode.fps
                    << ", format=" << py::repr(format).cast<std::string>()
-                   << ", subtype_guid=" << py::repr(py::cast(mode.subtype_guid)).cast<std::string>() << ")";
+                   << ")";
             return result.str();
         });
 

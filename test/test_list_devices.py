@@ -41,4 +41,7 @@ def test_devices_have_readable_repr():
         assert "CaptureDevice(" in text
         assert devices[0].name in text
         if devices[0].modes:
-            assert "CaptureMode(" in repr(devices[0].modes[0])
+            mode_text = repr(devices[0].modes[0])
+            assert "CaptureMode(" in mode_text
+            assert "subtype_guid" not in mode_text
+            assert f"fps={devices[0].modes[0].fps:.2f}" in mode_text
