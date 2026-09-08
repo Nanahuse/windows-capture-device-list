@@ -32,3 +32,13 @@ def test_list_devices_shape(backend):
 
 def test_backend_is_public():
     assert Backend.DIRECT_SHOW is not Backend.MEDIA_FOUNDATION
+
+
+def test_devices_have_readable_repr():
+    devices = list_devices()
+    if devices:
+        text = repr(devices[0])
+        assert "CaptureDevice(" in text
+        assert devices[0].name in text
+        if devices[0].modes:
+            assert "CaptureMode(" in repr(devices[0].modes[0])

@@ -2,6 +2,7 @@
 #include <pybind11/stl.h>
 
 #include <iterator>
+#include <sstream>
 
 #include "capture_device.h"
 #include "capture_mode.h"
@@ -25,7 +26,17 @@ PYBIND11_MODULE(core, m)
         .def_property_readonly("format", [](const CaptureMode &mode) -> py::object {
             return mode.format.empty() ? py::none() : py::cast(mode.format);
         })
-        .def_readonly("subtype_guid", &CaptureMode::subtype_guid);
+        .def_readonly("subtype_guid", &CaptureMode::subtype_guid)
+        .def("__repr__", [](const CaptureMode &mode) {
+            std::ostringstream result;
+            py::object format = mode.format.empty() ? py::none() : py::cast(mode.format);
+            result << "CaptureMode(width=" << mode.width
+                   << ", height=" << mode.height
+                   << ", fps=" << mode.fps
+                   << ", format=" << py::repr(format).cast<std::string>()
+                   << ", subtype_guid=" << py::repr(py::cast(mode.subtype_guid)).cast<std::string>() << ")";
+            return result.str();
+        });
 
     py::class_<CaptureDevice>(m, "CaptureDevice")
         .def_readonly("backend", &CaptureDevice::backend)
@@ -40,6 +51,15 @@ PYBIND11_MODULE(core, m)
                 modes.append(value);
             }
             return modes;
+        })
+        .def("__repr__", [](const CaptureDevice &device) {
+            std::ostringstream result;
+            result << "CaptureDevice(backend="
+                   << py::str(py::cast(device.backend)).cast<std::string>()
+                   << ", index=" << device.index
+                   << ", name=" << py::repr(py::cast(device.name)).cast<std::string>()
+                   << ", modes=" << device.modes.size() << ")";
+            return result.str();
         });
 
     m.def("list_devices", [](py::object backend) {
