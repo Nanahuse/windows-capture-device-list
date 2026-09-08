@@ -15,8 +15,6 @@ ext_modules = [
 ]
 
 setup(
-    name="windows-capture-device-list",
-    version="0.2.0",
     packages=["windows_capture_device_list"],
     ext_modules=ext_modules,
 )
