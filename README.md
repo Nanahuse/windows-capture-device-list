@@ -1,13 +1,13 @@
 # windows-capture-device-list
 
-Windows のキャプチャデバイスと、Windows API が明示したキャプチャモードを列挙する Python ライブラリです。DirectShow がデフォルトのバックエンドで、Media Foundation も選択できます。
+Windows のキャプチャデバイスと、Windows API が明示したキャプチャモードを列挙する Python ライブラリです。デフォルトではDirectShow、Media Foundationの順に両方のバックエンドを列挙します。
 
 ## DirectShow
 
 ```python
-from windows_capture_device_list import list_devices
+from windows_capture_device_list import Backend, list_devices
 
-devices = list_devices()
+devices = list_devices(Backend.DIRECT_SHOW)
 ```
 
 ## Media Foundation
@@ -18,7 +18,13 @@ from windows_capture_device_list import Backend, list_devices
 devices = list_devices(Backend.MEDIA_FOUNDATION)
 ```
 
-## 全バックエンド
+## デフォルト（全バックエンド）
+
+```python
+devices = list_devices()
+```
+
+明示的に全バックエンドを指定することもできます。
 
 ```python
 devices = list_devices(None)

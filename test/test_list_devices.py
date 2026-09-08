@@ -34,6 +34,12 @@ def test_backend_is_public():
     assert Backend.DIRECT_SHOW is not Backend.MEDIA_FOUNDATION
 
 
+def test_default_lists_backends_in_order():
+    devices = list_devices()
+    values = [device.backend.value for device in devices]
+    assert values == sorted(values)
+
+
 def test_devices_have_readable_repr():
     devices = list_devices()
     if devices:
