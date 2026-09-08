@@ -3,11 +3,18 @@
 #include <string>
 #include <vector>
 
-#include "resolution.h"
+#include "capture_mode.h"
+
+enum class Backend
+{
+    DIRECT_SHOW,
+    MEDIA_FOUNDATION,
+};
 
 struct CaptureDevice
 {
-    int id;
+    Backend backend;
+    int index;
     std::string name;
-    std::vector<Resolution> resolutions;
+    std::vector<CaptureMode> modes;
 };
