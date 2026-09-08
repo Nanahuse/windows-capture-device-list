@@ -9,4 +9,4 @@
  *
  * @return std::vector<CaptureDevice> A vector containing information about each capture device.
  */
-std::vector<CaptureDevice> list_devices();
+std::vector<CaptureDevice> list_devices(Backend backend);

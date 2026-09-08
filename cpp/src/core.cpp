@@ -1,160 +1,427 @@
+#include <algorithm>
+#include <cmath>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
-#include <algorithm>
+#include <cwctype>
 
 #include <windows.h>
 #include <dshow.h>
+#include <dvdmedia.h>
+#include <ks.h>
+#include <ksmedia.h>
+#include <mfapi.h>
+#include <mferror.h>
+#include <mfidl.h>
+#include <mfreadwrite.h>
 
 #include "capture_device.h"
-#include "resolution.h"
+#include "core.h"
 #include "scope_guard.hpp"
 
 #pragma comment(lib, "ole32.lib")
-#pragma comment(lib, "strmiids.lib")
 #pragma comment(lib, "oleaut32.lib")
+#pragma comment(lib, "strmiids.lib")
+#pragma comment(lib, "mf.lib")
+#pragma comment(lib, "mfplat.lib")
+#pragma comment(lib, "mfuuid.lib")
+#pragma comment(lib, "mfreadwrite.lib")
 
-std::string get_device_name(IMoniker *pMoniker)
+namespace
 {
-    ScopeGuard scope_guard;
+constexpr GUID kFourccTail = {0, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
 
-    IPropertyBag *pPropBag = nullptr;
-    if (FAILED(pMoniker->BindToStorage(0, 0, IID_IPropertyBag, (void **)&pPropBag)))
-    {
-        return "Unknown";
-    }
-    scope_guard.add_release(pPropBag);
-
-    VARIANT var;
-    VariantInit(&var);
-    if (FAILED(pPropBag->Read(L"FriendlyName", &var, 0)))
-    {
-        VariantClear(&var);
-        return "Unknown";
-    }
-
-    wchar_t *wname = var.bstrVal;
-    char cname[256];
-    WideCharToMultiByte(CP_UTF8, 0, wname, -1, cname, sizeof(cname), nullptr, nullptr);
-    std::string name = cname;
-
-    VariantClear(&var);
-    return name;
+bool equal_guid_tail(const GUID &guid)
+{
+    return guid.Data2 == kFourccTail.Data2 && guid.Data3 == kFourccTail.Data3 &&
+           std::equal(std::begin(guid.Data4), std::end(guid.Data4), std::begin(kFourccTail.Data4));
 }
 
-std::vector<Resolution> get_device_resolutions(IMoniker *pMoniker)
+std::string guid_string(const GUID &guid)
 {
-    ScopeGuard scope_guard;
-
-    IBaseFilter *pFilter = nullptr;
-    if (FAILED(pMoniker->BindToObject(0, 0, IID_IBaseFilter, (void **)&pFilter)))
-    {
+    wchar_t buffer[40]{};
+    if (StringFromGUID2(guid, buffer, static_cast<int>(std::size(buffer))) == 0)
         return {};
-    }
-    scope_guard.add_release(pFilter);
 
-    IEnumPins *pEnumPins = nullptr;
-    if (FAILED(pFilter->EnumPins(&pEnumPins)))
+    std::wstring value(buffer);
+    if (value.size() >= 2 && value.front() == L'{' && value.back() == L'}')
+        value = value.substr(1, value.size() - 2);
+
+    std::string result;
+    result.reserve(value.size());
+    for (wchar_t c : value)
+        result.push_back(static_cast<char>(std::towupper(c)));
+    return result;
+}
+
+std::string format_from_guid(const GUID &guid)
+{
+    if (equal_guid_tail(guid))
     {
+        std::string fourcc;
+        for (int shift = 0; shift < 32; shift += 8)
+        {
+            const char c = static_cast<char>((guid.Data1 >> shift) & 0xff);
+            if (c < 0x20 || c > 0x7e)
+                return {};
+            fourcc.push_back(c);
+        }
+        return fourcc;
+    }
+
+    if (IsEqualGUID(guid, MEDIASUBTYPE_RGB24))
+        return "RGB24";
+    if (IsEqualGUID(guid, MEDIASUBTYPE_RGB32))
+        return "RGB32";
+    if (IsEqualGUID(guid, MFVideoFormat_NV12))
+        return "NV12";
+    return {};
+}
+
+CaptureMode make_mode(int width, int height, double fps, const GUID &subtype)
+{
+    CaptureMode mode;
+    mode.width = width;
+    mode.height = height;
+    mode.fps = fps;
+    mode.subtype_guid = guid_string(subtype);
+    mode.format = format_from_guid(subtype);
+    return mode;
+}
+
+void deduplicate_modes(std::vector<CaptureMode> &modes)
+{
+    std::vector<CaptureMode> unique;
+    for (const auto &mode : modes)
+    {
+        const bool duplicate = std::any_of(unique.begin(), unique.end(), [&](const CaptureMode &other) {
+            return mode.width == other.width && mode.height == other.height &&
+                   mode.fps == other.fps && mode.subtype_guid == other.subtype_guid;
+        });
+        if (!duplicate)
+            unique.push_back(mode);
+    }
+    modes = std::move(unique);
+}
+
+std::string property_string(IPropertyBag *bag, LPCWSTR property)
+{
+    VARIANT value;
+    VariantInit(&value);
+    if (FAILED(bag->Read(property, &value, nullptr)))
+    {
+        VariantClear(&value);
+        return "Unknown";
+    }
+    ScopeGuard guard;
+    guard.add([&] { VariantClear(&value); });
+    if (value.vt != VT_BSTR || value.bstrVal == nullptr)
+        return "Unknown";
+    const int size = WideCharToMultiByte(CP_UTF8, 0, value.bstrVal, -1, nullptr, 0, nullptr, nullptr);
+    std::string result(size > 0 ? size - 1 : 0, '\0');
+    if (size > 1)
+        WideCharToMultiByte(CP_UTF8, 0, value.bstrVal, -1, &result[0], size - 1, nullptr, nullptr);
+    return result;
+}
+
+std::string device_name(IMoniker *moniker)
+{
+    IPropertyBag *bag = nullptr;
+    if (FAILED(moniker->BindToStorage(nullptr, nullptr, IID_PPV_ARGS(&bag))))
+        return "Unknown";
+    ScopeGuard guard;
+    guard.add_release(bag);
+    return property_string(bag, L"FriendlyName");
+}
+
+void free_media_type(AM_MEDIA_TYPE *media_type)
+{
+    if (media_type == nullptr)
+        return;
+    if (media_type->cbFormat != 0)
+        CoTaskMemFree(media_type->pbFormat);
+    if (media_type->pUnk != nullptr)
+        media_type->pUnk->Release();
+    CoTaskMemFree(media_type);
+}
+
+bool pin_category(IPin *pin, const GUID &category)
+{
+    IKsPropertySet *properties = nullptr;
+    if (FAILED(pin->QueryInterface(IID_PPV_ARGS(&properties))) )
+        return false;
+    ScopeGuard guard;
+    guard.add_release(properties);
+    GUID value{};
+    DWORD returned = 0;
+    return SUCCEEDED(properties->Get(AMPROPSETID_Pin, AMPROPERTY_PIN_CATEGORY, nullptr, 0,
+                                     &value, sizeof(value), &returned)) && IsEqualGUID(value, category);
+}
+
+IAMStreamConfig *stream_config_for_filter(IBaseFilter *filter)
+{
+    IEnumPins *pins = nullptr;
+    if (FAILED(filter->EnumPins(&pins)))
+        return nullptr;
+    ScopeGuard pins_guard;
+    pins_guard.add_release(pins);
+    IPin *capture_pin = nullptr;
+    IPin *preview_pin = nullptr;
+    IPin *pin = nullptr;
+    while (pins->Next(1, &pin, nullptr) == S_OK)
+    {
+        ScopeGuard pin_guard;
+        pin_guard.add_release(pin);
+        IAMStreamConfig *config = nullptr;
+        if (FAILED(pin->QueryInterface(IID_PPV_ARGS(&config))))
+            continue;
+        if (pin_category(pin, PIN_CATEGORY_PREVIEW))
+        {
+            if (preview_pin != nullptr)
+                preview_pin->Release();
+            preview_pin = pin;
+            preview_pin->AddRef();
+        }
+        else if (pin_category(pin, PIN_CATEGORY_CAPTURE) && capture_pin == nullptr)
+        {
+            capture_pin = pin;
+            capture_pin->AddRef();
+        }
+        config->Release();
+    }
+
+    IPin *selected = preview_pin != nullptr ? preview_pin : capture_pin;
+    IAMStreamConfig *result = nullptr;
+    if (selected != nullptr)
+        selected->QueryInterface(IID_PPV_ARGS(&result));
+    if (preview_pin != nullptr)
+        preview_pin->Release();
+    if (capture_pin != nullptr)
+        capture_pin->Release();
+    return result;
+}
+
+std::vector<CaptureMode> direct_show_modes(IMoniker *moniker)
+{
+    IBaseFilter *filter = nullptr;
+    if (FAILED(moniker->BindToObject(nullptr, nullptr, IID_PPV_ARGS(&filter))))
         return {};
-    }
-    scope_guard.add_release(pEnumPins);
+    ScopeGuard filter_guard;
+    filter_guard.add_release(filter);
+    IAMStreamConfig *config = stream_config_for_filter(filter);
+    if (config == nullptr)
+        return {};
+    ScopeGuard config_guard;
+    config_guard.add_release(config);
 
-    std::vector<Resolution> resolutions;
-
-    IPin *pPin = nullptr;
-    while (pEnumPins->Next(1, &pPin, nullptr) == S_OK)
+    int count = 0;
+    int size = 0;
+    if (FAILED(config->GetNumberOfCapabilities(&count, &size)) || size <= 0)
+        return {};
+    std::vector<CaptureMode> modes;
+    for (int i = 0; i < count; ++i)
     {
-        ScopeGuard loop_guard;
+        AM_MEDIA_TYPE *media_type = nullptr;
+        std::vector<BYTE> caps(static_cast<size_t>(size));
+        if (FAILED(config->GetStreamCaps(i, &media_type, caps.data())))
+            continue;
+        ScopeGuard media_guard;
+        media_guard.add([&] { free_media_type(media_type); });
+        if (media_type == nullptr || media_type->pbFormat == nullptr)
+            continue;
 
-        loop_guard.add_release(pPin);
-
-        IAMStreamConfig *pConfig = nullptr;
-        if (FAILED(pPin->QueryInterface(IID_IAMStreamConfig, (void **)&pConfig)))
+        LONG width = 0;
+        LONG height = 0;
+        REFERENCE_TIME frame_time = 0;
+        if (IsEqualGUID(media_type->formattype, FORMAT_VideoInfo) &&
+            media_type->cbFormat >= sizeof(VIDEOINFOHEADER))
+        {
+            auto *info = reinterpret_cast<VIDEOINFOHEADER *>(media_type->pbFormat);
+            width = info->bmiHeader.biWidth;
+            height = info->bmiHeader.biHeight;
+            frame_time = info->AvgTimePerFrame;
+        }
+        else if (IsEqualGUID(media_type->formattype, FORMAT_VideoInfo2) &&
+                 media_type->cbFormat >= sizeof(VIDEOINFOHEADER2))
+        {
+            auto *info = reinterpret_cast<VIDEOINFOHEADER2 *>(media_type->pbFormat);
+            width = info->bmiHeader.biWidth;
+            height = info->bmiHeader.biHeight;
+            frame_time = info->AvgTimePerFrame;
+        }
+        else
         {
             continue;
         }
-        loop_guard.add_release(pConfig);
-
-        int count = 0, size = 0;
-        if (FAILED(pConfig->GetNumberOfCapabilities(&count, &size)))
-        {
+        if (width <= 0 || height == 0 || frame_time <= 0)
             continue;
-        }
-
-        for (int i = 0; i < count; ++i)
-        {
-            AM_MEDIA_TYPE *pmt = nullptr;
-            std::vector<BYTE> caps(size);
-
-            if (FAILED(pConfig->GetStreamCaps(i, &pmt, caps.data())))
-            {
-                continue;
-            }
-
-            if (pmt->formattype == FORMAT_VideoInfo)
-            {
-                VIDEOINFOHEADER *vih = (VIDEOINFOHEADER *)pmt->pbFormat;
-                int w = vih->bmiHeader.biWidth;
-                int h = vih->bmiHeader.biHeight;
-                Resolution res{w, h};
-                if (std::none_of(resolutions.begin(), resolutions.end(), [&](const Resolution &r)
-                                 { return r == res; }))
-                {
-                    resolutions.push_back(res);
-                }
-            }
-
-            if (pmt->cbFormat != 0)
-            {
-                CoTaskMemFree((PVOID)pmt->pbFormat);
-                pmt->pbFormat = nullptr;
-            }
-            if (pmt->pUnk != nullptr)
-            {
-                pmt->pUnk->Release();
-                pmt->pUnk = nullptr;
-            }
-            CoTaskMemFree(pmt);
-        }
+        modes.push_back(make_mode(width, std::abs(height), 10000000.0 / frame_time, media_type->subtype));
     }
-
-    return resolutions;
+    deduplicate_modes(modes);
+    return modes;
 }
 
-std::vector<CaptureDevice> list_devices()
+std::vector<CaptureDevice> enumerate_direct_show()
 {
-    ScopeGuard scope_guard;
-
-    if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)))
-    {
+    HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(init))
         return {};
-    }
-    scope_guard.add(&CoUninitialize);
+    ScopeGuard com_guard;
+    com_guard.add(&CoUninitialize);
 
-    ICreateDevEnum *pDevEnum = nullptr;
-    if (FAILED(CoCreateInstance(CLSID_SystemDeviceEnum, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pDevEnum))))
-    {
+    ICreateDevEnum *device_enum = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_SystemDeviceEnum, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&device_enum))))
         return {};
-    }
-    scope_guard.add_release(pDevEnum);
-
-    IEnumMoniker *pEnum = nullptr;
-    if (!(pDevEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &pEnum, 0) == S_OK && pEnum))
-    {
+    ScopeGuard enum_guard;
+    enum_guard.add_release(device_enum);
+    IEnumMoniker *monikers = nullptr;
+    if (device_enum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &monikers, 0) != S_OK)
         return {};
-    }
-    scope_guard.add_release(pEnum);
+    ScopeGuard moniker_guard;
+    moniker_guard.add_release(monikers);
 
     std::vector<CaptureDevice> devices;
-
-    IMoniker *pMoniker = nullptr;
-    int id = 0;
-    while (pEnum->Next(1, &pMoniker, nullptr) == S_OK)
+    IMoniker *moniker = nullptr;
+    while (monikers->Next(1, &moniker, nullptr) == S_OK)
     {
-        std::string name = get_device_name(pMoniker);
-        std::vector<Resolution> resolutions = get_device_resolutions(pMoniker);
-        devices.push_back(CaptureDevice{id++, name, resolutions});
-        pMoniker->Release();
+        ScopeGuard guard;
+        guard.add_release(moniker);
+        auto modes = direct_show_modes(moniker);
+        devices.push_back({Backend::DIRECT_SHOW, static_cast<int>(devices.size()), device_name(moniker), std::move(modes)});
     }
+    return devices;
+}
+
+bool get_size(IMFMediaType *type, UINT32 &width, UINT32 &height)
+{
+    UINT64 value = 0;
+    if (FAILED(type->GetUINT64(MF_MT_FRAME_SIZE, &value)))
+        return false;
+    width = static_cast<UINT32>(value >> 32);
+    height = static_cast<UINT32>(value & 0xffffffff);
+    return width > 0 && height > 0;
+}
+
+std::vector<CaptureMode> media_foundation_modes(IMFActivate *activate)
+{
+    IMFMediaSource *source = nullptr;
+    if (FAILED(activate->ActivateObject(IID_PPV_ARGS(&source))))
+        return {};
+    ScopeGuard source_guard;
+    source_guard.add_release(source);
+    source_guard.add([source] { source->Shutdown(); });
+    IMFSourceReader *reader = nullptr;
+    if (FAILED(MFCreateSourceReaderFromMediaSource(source, nullptr, &reader)))
+        return {};
+    ScopeGuard reader_guard;
+    reader_guard.add_release(reader);
+
+    std::vector<CaptureMode> modes;
+    for (DWORD stream = 0;; ++stream)
+    {
+        bool found_stream = false;
+        for (DWORD index = 0;; ++index)
+        {
+            IMFMediaType *type = nullptr;
+            HRESULT result = reader->GetNativeMediaType(stream, index, &type);
+            if (result == MF_E_NO_MORE_TYPES || result == MF_E_INVALIDSTREAMNUMBER)
+                break;
+            if (FAILED(result))
+                break;
+            found_stream = true;
+            ScopeGuard type_guard;
+            type_guard.add_release(type);
+            GUID major{};
+            GUID subtype{};
+            UINT32 numerator = 0;
+            UINT32 denominator = 0;
+            UINT32 width = 0;
+            UINT32 height = 0;
+            if (FAILED(type->GetGUID(MF_MT_MAJOR_TYPE, &major)) ||
+                !IsEqualGUID(major, MFMediaType_Video) ||
+                FAILED(type->GetGUID(MF_MT_SUBTYPE, &subtype)) ||
+                !get_size(type, width, height) ||
+                FAILED(MFGetAttributeRatio(type, MF_MT_FRAME_RATE, &numerator, &denominator)) ||
+                denominator == 0)
+                continue;
+            modes.push_back(make_mode(static_cast<int>(width), static_cast<int>(height),
+                                      static_cast<double>(numerator) / denominator, subtype));
+        }
+        if (!found_stream && stream > 0)
+            break;
+    }
+    deduplicate_modes(modes);
+    return modes;
+}
+
+std::string activate_name(IMFActivate *activate)
+{
+    WCHAR *value = nullptr;
+    UINT32 length = 0;
+    if (FAILED(activate->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &value, &length)))
+        return "Unknown";
+    ScopeGuard guard;
+    guard.add([&] { CoTaskMemFree(value); });
+    const int size = WideCharToMultiByte(CP_UTF8, 0, value, static_cast<int>(length), nullptr, 0, nullptr, nullptr);
+    std::string result(size, '\0');
+    if (size > 0)
+        WideCharToMultiByte(CP_UTF8, 0, value, static_cast<int>(length), &result[0], size, nullptr, nullptr);
+    return result;
+}
+
+std::vector<CaptureDevice> enumerate_media_foundation()
+{
+    HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(init))
+        return {};
+    ScopeGuard com_guard;
+    com_guard.add(&CoUninitialize);
+    if (FAILED(MFStartup(MF_VERSION)))
+        return {};
+    ScopeGuard mf_guard;
+    mf_guard.add([] { MFShutdown(); });
+
+    IMFAttributes *attributes = nullptr;
+    if (FAILED(MFCreateAttributes(&attributes, 1)))
+        return {};
+    ScopeGuard attributes_guard;
+    attributes_guard.add_release(attributes);
+    if (FAILED(attributes->SetGUID(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+                                   MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID)))
+        return {};
+    IMFActivate **activates = nullptr;
+    UINT32 count = 0;
+    if (FAILED(MFEnumDeviceSources(attributes, &activates, &count)))
+        return {};
+    ScopeGuard activates_guard;
+    activates_guard.add([&] {
+        for (UINT32 i = 0; i < count; ++i)
+            activates[i]->Release();
+        CoTaskMemFree(activates);
+    });
+
+    std::vector<CaptureDevice> devices;
+    for (UINT32 i = 0; i < count; ++i)
+    {
+        auto modes = media_foundation_modes(activates[i]);
+        devices.push_back({Backend::MEDIA_FOUNDATION, static_cast<int>(devices.size()),
+                           activate_name(activates[i]), std::move(modes)});
+    }
+    return devices;
+}
+} // namespace
+
+std::vector<CaptureDevice> list_devices(Backend backend)
+{
+    std::vector<CaptureDevice> devices;
+    if (backend == Backend::DIRECT_SHOW)
+        devices = enumerate_direct_show();
+    else
+        devices = enumerate_media_foundation();
+    for (auto &device : devices)
+        for (auto &mode : device.modes)
+            mode.device = &device;
     return devices;
 }

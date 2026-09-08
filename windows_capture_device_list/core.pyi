@@ -1,32 +1,40 @@
-"""
-Windows Capture Device List Module
-"""
+"""Windows Capture Device List extension module."""
 from __future__ import annotations
-import collections.abc
-import typing
-__all__: list[str] = ['CaptureDevice', 'Resolution', 'list_devices']
+
+from enum import Enum
+
+__all__: list[str]
+
+
+class Backend(Enum):
+    DIRECT_SHOW: Backend
+    MEDIA_FOUNDATION: Backend
+
+
 class CaptureDevice:
-    def __init__(self, arg0: typing.SupportsInt, arg1: str, arg2: collections.abc.Sequence[Resolution]) -> None:
-        ...
     @property
-    def id(self) -> int:
-        ...
+    def backend(self) -> Backend: ...
     @property
-    def name(self) -> str:
-        ...
+    def index(self) -> int: ...
     @property
-    def resolutions(self) -> list[Resolution]:
-        ...
-class Resolution:
-    def __init__(self, arg0: typing.SupportsInt, arg1: typing.SupportsInt) -> None:
-        ...
+    def name(self) -> str: ...
     @property
-    def height(self) -> int:
-        ...
+    def modes(self) -> list[CaptureMode]: ...
+
+
+class CaptureMode:
     @property
-    def width(self) -> int:
-        ...
-def list_devices() -> list[CaptureDevice]:
-    """
-    List video capture devices
-    """
+    def device(self) -> CaptureDevice: ...
+    @property
+    def width(self) -> int: ...
+    @property
+    def height(self) -> int: ...
+    @property
+    def fps(self) -> float: ...
+    @property
+    def format(self) -> str | None: ...
+    @property
+    def subtype_guid(self) -> str: ...
+
+
+def list_devices(backend: Backend | None = Backend.DIRECT_SHOW) -> list[CaptureDevice]: ...
