@@ -74,5 +74,5 @@ PYBIND11_MODULE(core, m)
             return direct_show;
         }
         return list_devices(backend.cast<Backend>());
-    }, py::arg("backend") = Backend::DIRECT_SHOW, "List video capture devices");
+    }, py::arg("backend") = py::none(), "List video capture devices");
 }
